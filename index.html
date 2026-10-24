@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reaction Timer</title>
+<meta name="color-scheme" content="dark">
+
+<!-- Fonts: Space Grotesk (500, 700) for headings + timer, Inter (400, 600) for body -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Space+Grotesk:wght@500;700&display=swap">
+
+<style>
+  /* ---------- Design tokens ---------- */
+  :root {
+    --bg: #0F172A;        /* deep slate */
+    --surface: #1E293B;   /* panels */
+    --text: #F1F5F9;
+    --muted: #94A3B8;     /* secondary text, 5.8:1 on surface */
+    --line: #334155;      /* hairline borders */
+    --amber: #F59E0B;     /* waiting */
+    --emerald: #10B981;   /* go */
+    --rose: #F43F5E;      /* false start */
+    --sky: #38BDF8;       /* accent / idle / result */
+    --ink: #0F172A;       /* dark text on the bright state colors */
+
+    --font-display: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+    color-scheme: dark;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  *, *::before, *::after { box-sizing: inherit; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 400 1rem/1.55 var(--font-body);
+    min-height: 100%;
+  }
+
+  /* ---------- 3D canvas sits behind everything and never takes input ---------- */
+  #scene {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    pointer-events: none;
+    display: block;
+  }
+
+  /* ---------- Layout ---------- */
+  /* Phones: shapes occupy the top ~34% of the screen, content starts below.
+     Desktop: content sits left, shapes float on the right. */
+  .app {
+    position: relative;
+    z-index: 1;
+    width: min(100% - 2rem, 34rem);
+    margin: 0 auto;
+    padding: 34vh 0 3rem;
+  }
+  @media (min-width: 900px) {
+    .app { margin: 0 auto 0 max(2rem, 8vw); padding-top: 6vh; }
+  }
+  /* No WebGL: center the column and drop the reserved space */
+  .no-webgl .app { margin: 0 auto; padding-top: 2.5rem; }
+
+  h1 {
+    font: 700 clamp(1.75rem, 5vw, 2.5rem)/1.1 var(--font-display);
+    margin: 0 0 .5rem;
+    letter-spacing: -0.01em;
+  }
+  .lede { margin: 0 0 1.25rem; color: var(--muted); max-width: 32rem; }
+
+  /* ---------- The reaction pad ---------- */
+  .pad {
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: .35rem;
+    min-height: clamp(15rem, 38vh, 20rem);
+    padding: 1.5rem;
+    border-radius: 1.25rem;
+    border: 2px solid var(--sky);
+    background: var(--surface);
+    color: var(--text);
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    /* No colour transition on purpose: the go state must appear instantly. */
+  }
+  .state-label { margin: 0; font: 500 1.25rem/1.2 var(--font-display); }
+  .timer {
+    margin: 0;
+    font: 700 clamp(3.25rem, 15vw, 6rem)/1 var(--font-display);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .hint { margin: 0; max-width: 24rem; font-size: .95rem; color: var(--muted); }
+
+  [data-state="waiting"] .pad { background: var(--amber); border-color: var(--amber); color: var(--ink); }
+  [data-state="go"] .pad { background: var(--emerald); border-color: var(--emerald); color: var(--ink); }
+  [data-state="falseStart"] .pad { background: var(--rose); border-color: var(--rose); color: var(--ink); }
+  [data-state="waiting"] .hint,
+  [data-state="go"] .hint,
+  [data-state="falseStart"] .hint { color: var(--ink); }
+
+  .pad.shake { animation: shake .42s cubic-bezier(.36,.07,.19,.97); }
+  @keyframes shake {
+    10%, 90% { transform: translateX(-2px); }
+    20%, 80% { transform: translateX(4px); }
+    30%, 50%, 70% { transform: translateX(-8px); }
+    40%, 60% { transform: translateX(8px); }
+  }
+
+  /* ---------- Controls ---------- */
+  .start {
+    width: 100%;
+    margin-top: 1rem;
+    padding: .9rem 1rem;
+    border: 2px solid var(--sky);
+    border-radius: .75rem;
+    background: var(--sky);
+    color: var(--ink);
+    font: 600 1rem/1.2 var(--font-body);
+    cursor: pointer;
+  }
+  .start[aria-disabled="true"] {
+    background: var(--surface);
+    border-color: var(--line);
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+  :focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+  .pad:focus-visible, .start:focus-visible { outline-color: var(--text); }
+
+  .stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .75rem;
+    margin: 1rem 0 0;
+  }
+  .stats div {
+    padding: .85rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: .75rem;
+  }
+  .stats dt { font-size: .9rem; color: var(--muted); }
+  .stats dd {
+    margin: 0;
+    font: 500 1.75rem/1.2 var(--font-display);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .how {
+    margin-top: 1.25rem;
+    padding: 1.1rem 1.25rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: .75rem;
+  }
+  .how h2 { margin: 0 0 .5rem; font: 500 1.1rem/1.3 var(--font-display); }
+  .how ol { margin: 0; padding-left: 1.2rem; }
+  .how li + li { margin-top: .25rem; }
+
+  .sound { display: flex; align-items: center; gap: .6rem; margin-top: 1rem; color: var(--text); }
+  .sound input { width: 1.1rem; height: 1.1rem; accent-color: var(--sky); }
+
+  /* Visually hidden, still read by screen readers */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pad.shake { animation: none; }
+  }
+</style>
+</head>
+
+<body data-state="idle">
+  <canvas id="scene" aria-hidden="true"></canvas>
+
+  <main class="app">
+    <h1>Reaction timer</h1>
+    <p class="lede">See how fast you can react to the signal. Your best time and attempt count are tracked for this session.</p>
+
+    <!-- The pad is the main target for mouse and touch. Keyboard users press Space. -->
+    <div class="pad" id="pad">
+      <p class="state-label" id="stateLabel">Ready</p>
+      <p class="timer" id="timer">--</p>
+      <p class="hint" id="hint">Press Start, tap here, or hit Space.</p>
+    </div>
+
+    <button type="button" class="start" id="startBtn">Start round</button>
+
+    <dl class="stats">
+      <div><dt>Best time</dt><dd id="best">--</dd></div>
+      <div><dt>Attempts</dt><dd id="attempts">0</dd></div>
+    </dl>
+
+    <section class="how" aria-labelledby="how-title">
+      <h2 id="how-title">How it works</h2>
+      <ol>
+        <li>Start a round with the button, a tap on the pad, or the spacebar.</li>
+        <li>Wait while the pad says “Wait…”. The delay is random, between 2 and 5 seconds.</li>
+        <li>When the pad says “GO!”, press as fast as you can.</li>
+        <li>Pressing too early is a false start. No time is recorded.</li>
+      </ol>
+    </section>
+
+    <label class="sound">
+      <input type="checkbox" id="soundToggle">
+      <span>Play a sound with the GO signal</span>
+    </label>
+
+    <!-- Screen reader announcements for every state change -->
+    <div id="live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+  </main>
+
+  <!-- Three.js r128, pinned. The only external JavaScript library. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <script>
+  "use strict";
+  /* =====================================================================
+   * REACTION TIMER
+   *
+   * STATE MACHINE
+   *   idle ──start──▶ waiting ──timeout──▶ go ──press──▶ result
+   *                      │                                  │
+   *                      └──press (too early)──▶ falseStart │
+   *   result / falseStart ──start──▶ waiting   (no reload needed)
+   *   waiting / go ──tab hidden──▶ idle (round cancelled)
+   *
+   * HOW PENDING TIMEOUTS ARE CLEARED
+   *   The only timer is `waitTimer` (the random 2–5 s delay). clearPending()
+   *   cancels it and is called on every reset path: false start, result,
+   *   new round, tab hidden, page hide. As a second guard each round gets an
+   *   id (`roundId`); the timeout callback ignores itself if the id is stale,
+   *   so a cancelled round can never fire a late GO signal.
+   *
+   * WHY THE SIGNAL TIME IS RECORDED OUTSIDE THE RENDER LOOP
+   *   `signalTime` is captured in showGo(), the same synchronous code path
+   *   that flips the UI to the go state (timeout callback → DOM update →
+   *   performance.now()). The Three.js loop is purely visual: it never reads
+   *   input, never sets signalTime, and the game never waits on it. A slow or
+   *   dropped frame can therefore not change a measured reaction time.
+   *   Input time uses event.timeStamp (when the browser received the event),
+   *   which excludes main-thread delay between the press and our handler.
+   * ===================================================================== */
+
+  (() => {
+    /* ---------- Config ---------- */
+    const MIN_WAIT_MS = 2000;
+    const MAX_WAIT_MS = 5000;
+    const INPUT_LOCK_MS = 350;   // ignore presses right after a result so a double-tap doesn't start a new round
+
+    const COLORS = {
+      sky: 0x38BDF8,
+      amber: 0xF59E0B,
+      emerald: 0x10B981,
+      rose: 0xF43F5E,
+      text: 0xF1F5F9
+    };
+
+    /* ---------- DOM ---------- */
+    const $ = (id) => document.getElementById(id);
+    const els = {
+      canvas: $("scene"), pad: $("pad"), label: $("stateLabel"), timer: $("timer"),
+      hint: $("hint"), start: $("startBtn"), best: $("best"), attempts: $("attempts"),
+      live: $("live"), sound: $("soundToggle")
+    };
+
+    const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const wideQuery = window.matchMedia("(min-width: 900px)");
+
+    /* =====================================================================
+     * 3D SCENE (visual only)
+     * Returns null if Three.js or WebGL is unavailable.
+     * Public surface: setState(name), setReduced(bool), dispose().
+     * ===================================================================== */
+    function createScene(canvas) {
+      if (!window.THREE) return null;
+
+      let renderer;
+      try {
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+      } catch (err) {
+        return null; // WebGL unavailable
+      }
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // cap at 2
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50);
+      camera.position.z = 8;
+
+      /* Geometries and materials are created once and reused for every frame. */
+      const disposables = [];
+      const keep = (obj) => { disposables.push(obj); return obj; };
+
+      const facetMat = keep(new THREE.MeshStandardMaterial({ color: COLORS.sky, roughness: 0.35, metalness: 0.2, flatShading: true, emissive: COLORS.sky, emissiveIntensity: 0.18 }));
+      const smoothMat = keep(new THREE.MeshStandardMaterial({ color: COLORS.sky, roughness: 0.35, metalness: 0.2, emissive: COLORS.sky, emissiveIntensity: 0.18 }));
+
+      const group = new THREE.Group();
+      scene.add(group);
+
+      const core = new THREE.Mesh(keep(new THREE.IcosahedronGeometry(0.95, 0)), facetMat);
+      const ring = new THREE.Mesh(keep(new THREE.TorusGeometry(1.55, 0.09, 16, 96)), smoothMat);
+      ring.rotation.x = Math.PI / 2.4;
+      group.add(core, ring);
+
+      const orbit = new THREE.Group();
+      group.add(orbit);
+      const sphereGeo = keep(new THREE.SphereGeometry(1, 24, 16));
+      const floaters = [];
+      for (let i = 0; i < 6; i++) {
+        const mesh = new THREE.Mesh(sphereGeo, smoothMat);
+        const angle = (i / 6) * Math.PI * 2;
+        const radius = 2.0 + (i % 2) * 0.25;
+        const baseY = (i % 3 - 1) * 0.5;
+        mesh.position.set(Math.cos(angle) * radius, baseY, Math.sin(angle) * radius);
+        mesh.scale.setScalar(0.12 + (i % 3) * 0.05);
+        orbit.add(mesh);
+        floaters.push({ mesh, baseY, phase: i * 1.3, freq: 0.8 + (i % 3) * 0.25 });
+      }
+
+      /* Lighting uses palette colours: a state-coloured key light + soft white fill */
+      scene.add(new THREE.AmbientLight(COLORS.text, 0.45));
+      const fill = new THREE.DirectionalLight(COLORS.text, 0.6);
+      fill.position.set(-3, 4, 5);
+      scene.add(fill);
+      const key = new THREE.PointLight(COLORS.sky, 1.4, 0, 2);
+      key.position.set(3, 3, 6);
+      scene.add(key);
+
+      /* ---- State-driven targets (eased toward each frame) ---- */
+      const PRESETS = {
+        idle:       { color: COLORS.sky,     speed: 0.25, bob: 1.0 },
+        waiting:    { color: COLORS.amber,   speed: 0.07, bob: 0.35 }, // slower, steadier
+        go:         { color: COLORS.emerald, speed: 0.9,  bob: 1.4 },
+        falseStart: { color: COLORS.rose,    speed: 0.25, bob: 0.6 },
+        result:     { color: COLORS.sky,     speed: 0.25, bob: 1.0 }   // settles back to idle
+      };
+      const PULSE_MS = 380;
+      const SHAKE_MS = 420;
+
+      const color = new THREE.Color(COLORS.sky);
+      const target = new THREE.Color(COLORS.sky);
+      let speed = PRESETS.idle.speed, speedTarget = speed;
+      let bob = PRESETS.idle.bob, bobTarget = bob;
+      let pulseStart = -1, shakeStart = -1;
+      let reduce = reducedMotionQuery.matches;
+      const base = { x: 0, y: 0, s: 1 };
+
+      function setState(name) {
+        const p = PRESETS[name] || PRESETS.idle;
+        target.setHex(p.color);
+        speedTarget = p.speed;
+        bobTarget = p.bob;
+        if (name === "go") pulseStart = performance.now();
+        if (name === "falseStart") shakeStart = performance.now();
+      }
+
+      function setReduced(value) {
+        reduce = value;
+        if (reduce) {
+          // Static pose: stop rotation, pulsing and shaking, keep only colour changes
+          core.rotation.set(0, 0, 0);
+          ring.rotation.set(Math.PI / 2.4, 0, 0);
+          orbit.rotation.set(0, 0, 0);
+          floaters.forEach((f) => { f.mesh.position.y = f.baseY; });
+          pulseStart = shakeStart = -1;
+        }
+      }
+
+      /* Fit the cluster to the layout: right side on desktop, top band on phones */
+      function layout() {
+        const halfH = Math.tan(THREE.MathUtils.degToRad(22.5)) * camera.position.z;
+        const halfW = halfH * camera.aspect;
+        const CLUSTER_RADIUS = 2.3;
+        if (wideQuery.matches) {
+          base.x = halfW * 0.5;
+          base.y = 0;
+          base.s = Math.min(1, (halfW * 0.5) / CLUSTER_RADIUS, (halfH * 0.9) / CLUSTER_RADIUS);
+        } else {
+          const band = 0.34; // matches the 34vh top padding in CSS
+          base.x = 0;
+          base.y = halfH * (1 - band);
+          base.s = Math.min(1, (band * halfH) / CLUSTER_RADIUS, halfW / CLUSTER_RADIUS);
+        }
+      }
+
+      function resize() {
+        const w = window.innerWidth, h = window.innerHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        layout();
+      }
+
+      /* ---- The single requestAnimationFrame loop. Visual only. ---- */
+      let raf = 0;
+      let last = performance.now();
+      function frame(now) {
+        raf = requestAnimationFrame(frame);
+        const dt = Math.min((now - last) / 1000, 0.1);
+        last = now;
+
+        if (reduce) color.copy(target);
+        else color.lerp(target, 1 - Math.exp(-dt * 9));
+        facetMat.color.copy(color); facetMat.emissive.copy(color);
+        smoothMat.color.copy(color); smoothMat.emissive.copy(color);
+        key.color.copy(color);
+
+        let scale = 1, shakeX = 0;
+        if (!reduce) {
+          const ease = 1 - Math.exp(-dt * 3);
+          speed += (speedTarget - speed) * ease;
+          bob += (bobTarget - bob) * ease;
+
+          core.rotation.y += speed * dt;
+          core.rotation.x += speed * 0.45 * dt;
+          ring.rotation.z += speed * 0.7 * dt;
+          ring.rotation.y += speed * 0.25 * dt;
+          orbit.rotation.y += speed * 0.6 * dt;
+
+          const t = now / 1000;
+          for (const f of floaters) {
+            f.mesh.position.y = f.baseY + Math.sin(t * f.freq + f.phase) * 0.18 * bob;
+          }
+
+          if (pulseStart >= 0) {            // quick scale pulse on GO
+            const p = Math.max(0, (now - pulseStart) / PULSE_MS);
+            if (p < 1) scale = 1 + 0.28 * Math.sin(p * Math.PI); else pulseStart = -1;
+          }
+          if (shakeStart >= 0) {            // brief shake on false start
+            const p = Math.max(0, (now - shakeStart) / SHAKE_MS);
+            if (p < 1) shakeX = Math.sin(p * Math.PI * 10) * 0.22 * (1 - p); else shakeStart = -1;
+          }
+        }
+
+        group.position.set(base.x + shakeX, base.y, 0);
+        group.scale.setScalar(base.s * scale);
+        renderer.render(scene, camera);
+      }
+
+      function dispose() {
+        cancelAnimationFrame(raf);
+        window.removeEventListener("resize", resize);
+        disposables.forEach((d) => d.dispose());
+        renderer.dispose();
+      }
+
+      window.addEventListener("resize", resize);
+      wideQuery.addEventListener("change", resize);
+      setReduced(reduce);
+      resize();
+      raf = requestAnimationFrame(frame);
+
+      return { setState, setReduced, dispose, canvas: renderer.domElement };
+    }
+
+    const sceneApi = createScene(els.canvas);
+    if (!sceneApi) {
+      // Fallback: hide the canvas, keep the game fully functional
+      els.canvas.hidden = true;
+      document.documentElement.classList.add("no-webgl");
+    } else {
+      els.canvas.addEventListener("webglcontextlost", (e) => {
+        e.preventDefault();
+        els.canvas.hidden = true;
+        document.documentElement.classList.add("no-webgl");
+      });
+      reducedMotionQuery.addEventListener("change", (e) => sceneApi.setReduced(e.matches));
+    }
+
+    /* =====================================================================
+     * GAME LOGIC
+     * ===================================================================== */
+    let state = "idle";
+    let roundId = 0;          // invalidates stale timeouts
+    let waitTimer = 0;        // the one pending timeout
+    let signalTime = 0;       // performance.now() when GO was shown
+    let lockUntil = 0;        // short input lock after a round ends
+    let best = null;
+    let attempts = 0;
+    let announceFlip = false;
+
+    const UI = {
+      idle:       { label: "Ready",       timer: "--",  btn: "Start round",   disabled: false, hint: "Press Start, tap here, or hit Space." },
+      waiting:    { label: "Wait…",       timer: "…",   btn: "Wait for GO…",  disabled: true,  hint: "Don’t press yet. Wait for GO." },
+      go:         { label: "GO!",         timer: "GO",  btn: "Press now!",    disabled: true,  hint: "Press now!" },
+      result:     { label: "Your time",   timer: "",    btn: "Try again",     disabled: false, hint: "Tap here, press Start, or hit Space to go again." },
+      falseStart: { label: "Too early",   timer: "--",  btn: "Try again",     disabled: false, hint: "False start. You pressed before GO, so no time was recorded. Press to try again." }
+    };
+
+    function announce(message) {
+      // Alternate an invisible character so repeated identical messages are still announced
+      announceFlip = !announceFlip;
+      els.live.textContent = message + (announceFlip ? "\u200B" : "");
+    }
+
+    function setUI(next, opts = {}) {
+      state = next;
+      const ui = UI[next];
+      document.body.dataset.state = next;
+      els.label.textContent = ui.label;
+      els.timer.textContent = opts.timer != null ? opts.timer : ui.timer;
+      els.hint.textContent = opts.hint || ui.hint;
+      els.start.textContent = ui.btn;
+      els.start.setAttribute("aria-disabled", String(ui.disabled));
+
+      els.pad.classList.remove("shake");
+      if (next === "falseStart") { void els.pad.offsetWidth; els.pad.classList.add("shake"); }
+
+      if (sceneApi) sceneApi.setState(next);   // fire-and-forget; the game never waits on or reads the scene
+      if (opts.announce) announce(opts.announce);
+    }
+
+    function clearPending() {
+      clearTimeout(waitTimer);
+      waitTimer = 0;
+    }
+
+    function startRound() {
+      clearPending();
+      const id = ++roundId;
+      ensureAudio();
+      setUI("waiting", { announce: "Round started. Wait for the go signal." });
+
+      const delay = MIN_WAIT_MS + Math.random() * (MAX_WAIT_MS - MIN_WAIT_MS);
+      waitTimer = setTimeout(() => {
+        if (id !== roundId || state !== "waiting") return; // stale: round was reset
+        showGo();
+      }, delay);
+    }
+
+    /* Signal time is captured here, in the same code path that switches the
+       UI to the go state, never in the render loop. (The browser paints
+       moments after this callback returns; that sub-frame gap is inherent to
+       any web reaction test.) */
+    function showGo() {
+      setUI("go", { announce: "Go! Press now." });
+      signalTime = performance.now();
+      if (els.sound.checked) beep();
+    }
+
+    function falseStart() {
+      clearPending();
+      roundId++;
+      lockUntil = performance.now() + INPUT_LOCK_MS;
+      setUI("falseStart", { announce: "False start. Too early. No time recorded." });
+    }
+
+    function finishRound(inputTime) {
+      const reaction = inputTime - signalTime;
+      if (reaction < 0) { falseStart(); return; } // input physically happened before GO was shown
+
+      clearPending();
+      roundId++;
+      lockUntil = performance.now() + INPUT_LOCK_MS;
+
+      const ms = Math.round(reaction);
+      attempts += 1;
+      best = best === null ? ms : Math.min(best, ms);
+      els.best.textContent = best + " ms";
+      els.attempts.textContent = String(attempts);
+
+      setUI("result", {
+        timer: ms + " ms",
+        announce: "Reaction time " + ms + " milliseconds. Best " + best + " milliseconds. Attempt " + attempts + "."
+      });
+    }
+
+    function resetToIdle(message) {
+      clearPending();
+      roundId++;
+      setUI("idle", { hint: message, announce: message });
+    }
+
+    /* Timestamp of the input event (same clock as performance.now()),
+       falling back to performance.now() if the browser reports an epoch time. */
+    function eventTime(e) {
+      const now = performance.now();
+      return e && e.timeStamp > 0 && e.timeStamp <= now ? e.timeStamp : now;
+    }
+
+    /* One entry point for every kind of input */
+    function onInput(e) {
+      switch (state) {
+        case "waiting": falseStart(); break;
+        case "go":      finishRound(eventTime(e)); break;
+        default:
+          if (performance.now() >= lockUntil) startRound();
+      }
+    }
+
+    /* ---------- Input wiring ---------- */
+    // Mouse + touch + pen on the pad. pointerdown (not click) so we measure the press, not the release.
+    els.pad.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      onInput(e);
+    });
+
+    // Start button: only valid when no round is running (keyboard presses are handled globally below)
+    els.start.addEventListener("click", () => {
+      if (state === "waiting" || state === "go") return;
+      if (performance.now() >= lockUntil) startRound();
+    });
+
+    // Spacebar (and Enter, for the focused button). preventDefault stops the
+    // browser from also firing a click on a focused button.
+    window.addEventListener("keydown", (e) => {
+      if (e.code !== "Space" && e.key !== "Enter") return;
+      if (e.target instanceof HTMLInputElement) return; // let the checkbox work normally
+      e.preventDefault();
+      if (e.repeat) return;
+      onInput(e);
+    });
+    window.addEventListener("keyup", (e) => {
+      if (e.code === "Space" && !(e.target instanceof HTMLInputElement)) e.preventDefault();
+    });
+
+    // A hidden tab would throttle timers and skew results, so cancel the round.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && (state === "waiting" || state === "go")) {
+        resetToIdle("Round cancelled because the tab was hidden.");
+      }
+    });
+
+    window.addEventListener("pagehide", (e) => {
+      clearPending();
+      if (!e.persisted && sceneApi) sceneApi.dispose(); // keep the scene alive if the page is cached for back/forward
+    });
+
+    /* ---------- Optional audible cue ---------- */
+    let audioCtx = null;
+    function ensureAudio() {
+      if (!els.sound.checked) return;
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        audioCtx = audioCtx || new Ctx();            // created inside a user gesture
+        if (audioCtx.state === "suspended") audioCtx.resume();
+      } catch (err) { /* sound is optional */ }
+    }
+    function beep() {
+      if (!audioCtx) return;
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.15, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.16);
+    }
+
+    setUI("idle");
+  })();
+  </script>
+</body>
+</html>
